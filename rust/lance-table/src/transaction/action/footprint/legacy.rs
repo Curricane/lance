@@ -258,8 +258,9 @@ fn field_refs(fields: &[i32]) -> impl Iterator<Item = FieldRef> + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::DataFile;
     use crate::format::key_existence::{FilterType, KeyExistenceFilter};
+    use crate::format::{DataFile, RowIdMeta};
+    use crate::rowids::write_row_ids;
     use crate::transaction::action::{
         Action, AddDataFile, AddFragment, AddFragmentParts, AddIndexSegment, AddIndexSegmentParts,
         AssertUniqueKeys, CompositeOperation, UserStep, Verdict,
@@ -351,11 +352,15 @@ mod tests {
     }
 
     fn append_actions() -> Vec<Action> {
+        append_actions_carrying(None)
+    }
+
+    fn append_actions_carrying(row_id_meta: Option<RowIdMeta>) -> Vec<Action> {
         vec![
             Action::AddFragment(AddFragment::new_unchecked(AddFragmentParts {
                 id: Ref::Local(0),
                 physical_rows: 10,
-                row_id_meta: None,
+                row_id_meta,
                 last_updated_at_version_meta: None,
                 created_at_version_meta: None,
                 data_change: true,
@@ -616,6 +621,42 @@ mod tests {
         assert_eq!(conflicts(&named(ours), &set(theirs)), expected);
         assert_eq!(conflicts(&set(ours), &named(theirs)), expected);
         assert_eq!(conflicts(&set(ours), &set(theirs)), expected);
+    }
+
+    /// Row ids a named operation's new fragments arrive carrying are claimed
+    /// as an `AddFragment`'s are: two writers that spend the same reserved ids
+    /// would leave one row id live in two fragments. Ids that do not decode
+    /// claim everything.
+    #[rstest]
+    #[case::the_same_ids(10..15, true)]
+    #[case::other_ids(15..20, false)]
+    fn test_named_new_fragments_claim_their_row_ids(
+        #[values(false, true)] named_update: bool,
+        #[case] action_ids: std::ops::Range<u64>,
+        #[case] expected: bool,
+    ) {
+        let inline =
+            |ids: std::ops::Range<u64>| RowIdMeta::Inline(write_row_ids(&ids.into()).into());
+        let set = actions(append_actions_carrying(Some(inline(action_ids))));
+        let named = |row_id_meta| {
+            let fragments = vec![Fragment {
+                row_id_meta: Some(row_id_meta),
+                ..fragment(0)
+            }];
+            if named_update {
+                update(vec![], fragments, vec![], None)
+            } else {
+                Operation::Append { fragments }
+            }
+        };
+
+        let reserved = named(inline(10..15));
+        assert_eq!(conflicts(&set, &reserved), expected);
+        assert_eq!(conflicts(&reserved, &set), expected);
+
+        let undecodable = named(RowIdMeta::Inline(vec![0xff; 3].into()));
+        assert!(conflicts(&set, &undecodable));
+        assert!(conflicts(&undecodable, &set));
     }
 
     /// A compaction carries the indices over the rows it moves through a remap

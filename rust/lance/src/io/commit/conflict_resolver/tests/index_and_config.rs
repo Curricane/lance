@@ -874,6 +874,135 @@ async fn test_a_pair_without_its_manifests_fails_closed() {
     );
 }
 
+fn table_metadata_update(key: &str) -> UpdateMap {
+    UpdateMap {
+        update_entries: vec![(key, Some("v")).into()],
+        replace: false,
+    }
+}
+
+fn named_table_metadata_txn(read_version: u64, key: &str) -> Transaction {
+    Transaction::new_from_version(
+        read_version,
+        Operation::UpdateConfig {
+            config_updates: None,
+            table_metadata_updates: Some(table_metadata_update(key)),
+            schema_metadata_updates: None,
+            field_metadata_updates: HashMap::new(),
+        },
+    )
+}
+
+fn action_table_metadata_txn(read_version: u64, key: &str) -> Transaction {
+    Transaction::new_from_version(
+        read_version,
+        Operation::CompositeOperation(CompositeOperation::new(vec![UserStep::new(
+            "step",
+            vec![TxnAction::ConfigUpdate(
+                lance_table::transaction::action::ConfigUpdate::default()
+                    .with_table_metadata(table_metadata_update(key)),
+            )],
+        )])),
+    )
+}
+
+/// Commit each transaction in turn on top of `dataset`, each read at the
+/// version before it. Returns the latest dataset.
+async fn commit_each(dataset: &Dataset, transactions: Vec<fn(u64) -> Transaction>) -> Dataset {
+    let mut current = dataset.clone();
+    for transaction in transactions {
+        current = CommitBuilder::new(Arc::new(current.clone()))
+            .with_experimental_composite_operations(true)
+            .execute(transaction(current.manifest.version))
+            .await
+            .unwrap();
+    }
+    current
+}
+
+/// Catch up `ours`, read at `read`, on the versions committed since, the way
+/// the commit loop does.
+async fn caught_up_rebase(
+    read: &Dataset,
+    ours: Transaction,
+) -> (TransactionRebase<'_>, Vec<crate::dataset::NewTransaction>) {
+    let (latest, transactions) = crate::io::commit::load_and_sort_new_transactions(read)
+        .await
+        .unwrap();
+    let mut rebase = TransactionRebase::try_new(read, ours, None).await.unwrap();
+    crate::io::commit::record_committed_history(
+        &mut rebase,
+        &latest,
+        read.manifest.clone(),
+        &transactions,
+    )
+    .await
+    .unwrap();
+    (rebase, transactions)
+}
+
+/// Neither side of a named pair is compared by footprint, and an action
+/// set's footprint comes from its actions, so a named transaction catching
+/// up keeps nothing from the manifests it passes: a writer thousands of
+/// versions behind must not hold one per version.
+#[tokio::test]
+async fn test_a_named_catch_up_records_no_manifests() {
+    let read = test_dataset(10, 2).await;
+    commit_each(
+        &read,
+        vec![
+            |version| named_table_metadata_txn(version, "b"),
+            |version| action_table_metadata_txn(version, "c"),
+        ],
+    )
+    .await;
+
+    let (mut rebase, transactions) =
+        caught_up_rebase(&read, named_table_metadata_txn(read.manifest.version, "a")).await;
+
+    assert_eq!(rebase.recorded_versions(), Vec::<u64>::new());
+    for (version, transaction, _) in &transactions {
+        rebase.check_txn(transaction, *version).unwrap();
+    }
+}
+
+/// An action set catching up records only the named commits it passes, the
+/// ones whose footprint is read off the manifests either side, and is still
+/// compared with each by footprint: compatible where they touch other keys,
+/// conflicting where they touch its own.
+#[tokio::test]
+async fn test_an_action_catch_up_records_only_named_commits() {
+    let read = test_dataset(10, 2).await;
+    commit_each(
+        &read,
+        vec![
+            |version| named_table_metadata_txn(version, "b"),
+            |version| action_table_metadata_txn(version, "c"),
+            |version| named_table_metadata_txn(version, "a"),
+        ],
+    )
+    .await;
+    let read_version = read.manifest.version;
+
+    let (mut rebase, transactions) =
+        caught_up_rebase(&read, action_table_metadata_txn(read_version, "a")).await;
+
+    assert_eq!(
+        rebase.recorded_versions(),
+        vec![read_version + 1, read_version + 3]
+    );
+    let [first, second, third] = transactions.as_slice() else {
+        panic!("expected three commits, got {}", transactions.len());
+    };
+    rebase.check_txn(&first.1, first.0).unwrap();
+    rebase.check_txn(&second.1, second.0).unwrap();
+    let result = rebase.check_txn(&third.1, third.0);
+    assert!(
+        matches!(result, Err(Error::RetryableCommitConflict { .. })),
+        "expected a retryable conflict on the shared key, got {result:?}",
+    );
+}
+
 #[tokio::test]
 async fn test_add_bases_name_conflict() {
     let dataset = test_dataset(10, 2).await;

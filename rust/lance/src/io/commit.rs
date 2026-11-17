@@ -1752,6 +1752,20 @@ pub(crate) async fn load_and_sort_new_transactions(
     Ok((new_ds, txns))
 }
 
+/// Record in `rebase` what its checks need to know about `transactions`,
+/// which committed on top of `since`, in version order.
+pub(crate) async fn record_committed_history(
+    rebase: &mut TransactionRebase<'_>,
+    _dataset: &Dataset,
+    since: Arc<Manifest>,
+    transactions: &[NewTransaction],
+) -> Result<()> {
+    rebase.record_manifests(
+        std::iter::once(since).chain(transactions.iter().map(|(_, _, manifest)| manifest.clone())),
+    );
+    Ok(())
+}
+
 /// Success-path bookkeeping shared by the direct-success and
 /// verified-own-commit paths of [`commit_transaction`]: populate the session
 /// caches and run the auto-cleanup hook.
@@ -1941,13 +1955,13 @@ pub(crate) async fn commit_transaction(
                     .await?
                     .with_read_version_dataset(&read_version_dataset);
             rebase.load_current_lineage(&dataset).await?;
-            rebase.record_manifests(
-                std::iter::once(checked_since.clone()).chain(
-                    other_transactions
-                        .iter()
-                        .map(|(_, _, manifest)| manifest.clone()),
-                ),
-            );
+            record_committed_history(
+                &mut rebase,
+                &dataset,
+                checked_since.clone(),
+                &other_transactions,
+            )
+            .await?;
             let seen = other_transactions
                 .iter()
                 .map(|(version, _, _)| *version)

@@ -110,6 +110,22 @@ impl<'a> TransactionRebase<'a> {
         }
     }
 
+    /// The committed versions this rebase holds something recorded from their
+    /// manifests for.
+    #[cfg(test)]
+    pub(crate) fn recorded_versions(&self) -> Vec<u64> {
+        let read = self.manifests.read.as_ref().map(|read| read.version);
+        let mut versions: Vec<u64> = self
+            .manifests
+            .by_version
+            .keys()
+            .copied()
+            .filter(|version| Some(*version) != read)
+            .collect();
+        versions.sort_unstable();
+        versions
+    }
+
     /// Whether an action-based transaction conflicts with `other_transaction`.
     ///
     /// Reached from both directions: when the transaction being committed is

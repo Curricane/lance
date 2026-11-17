@@ -1002,7 +1002,13 @@ async fn replay_staged_segments_from(
         .into_iter()
         .filter(|(version, _, _)| *version <= snapshot)
         .collect();
-    rebase.record_manifests(window.iter().map(|(_, _, manifest)| manifest.clone()));
+    crate::io::commit::record_committed_history(
+        &mut rebase,
+        dataset,
+        read_dataset.manifest.clone(),
+        &window,
+    )
+    .await?;
     // The listing only knows the manifests that still exist. A version
     // cleaned up between the build and the snapshot leaves no trace in it,
     // and whatever that commit did to the indexed columns cannot be

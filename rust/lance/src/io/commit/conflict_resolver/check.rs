@@ -102,26 +102,37 @@ impl<'a> TransactionRebase<'a> {
         }
     }
 
-    /// Record manifests committed since the read version, so a concurrent
-    /// transaction committed between two of them can be compared by footprint.
-    pub fn record_manifests(&mut self, manifests: impl IntoIterator<Item = Arc<Manifest>>) {
-        for manifest in manifests {
-            self.manifests.record(manifest);
-        }
+    /// Whether checking `other_transaction` takes the footprint of its commit
+    /// from the manifests either side of it, which the caller then has to
+    /// [record](Self::record_committed). Only a named operation's footprint
+    /// is read off them, and only an action set's check compares one; an
+    /// action set's own footprint comes from its actions.
+    pub fn needs_committed_manifests(&self, other_transaction: &Transaction) -> bool {
+        matches!(self.transaction.operation, Operation::CompositeOperation(_))
+            && !matches!(
+                other_transaction.operation,
+                Operation::CompositeOperation(_)
+            )
     }
 
-    /// The committed versions this rebase holds something recorded from their
-    /// manifests for.
+    /// Record the footprint of `transaction`, which committed `after` on top
+    /// of `before` as `version`. Only the footprint is kept.
+    pub fn record_committed(
+        &mut self,
+        version: u64,
+        transaction: &Transaction,
+        before: &Manifest,
+        after: &Manifest,
+    ) {
+        self.footprint_basis
+            .committed
+            .insert(version, Footprint::committed(transaction, before, after));
+    }
+
+    /// The committed versions this rebase holds a footprint for.
     #[cfg(test)]
     pub(crate) fn recorded_versions(&self) -> Vec<u64> {
-        let read = self.manifests.read.as_ref().map(|read| read.version);
-        let mut versions: Vec<u64> = self
-            .manifests
-            .by_version
-            .keys()
-            .copied()
-            .filter(|version| Some(*version) != read)
-            .collect();
+        let mut versions: Vec<u64> = self.footprint_basis.committed.keys().copied().collect();
         versions.sort_unstable();
         versions
     }
@@ -132,16 +143,20 @@ impl<'a> TransactionRebase<'a> {
     /// action-based, and when a concurrent one is. Either side may be a named
     /// operation; both are compared by footprint.
     ///
-    /// Fails closed when the manifests either side of `other_version` were not
-    /// recorded, since there is then nothing to take its footprint against.
+    /// Fails closed when a named operation's footprint was not recorded, since
+    /// the manifests either side of its commit were then not available.
     fn check_action_txn(
         &mut self,
         other_transaction: &Transaction,
         other_version: u64,
     ) -> Result<()> {
-        let (Some(read), Some((before, after))) =
-            (&self.manifests.read, self.manifests.around(other_version))
-        else {
+        let committed = match &other_transaction.operation {
+            Operation::CompositeOperation(composite_operation) => {
+                Some(Footprint::from(composite_operation))
+            }
+            _ => self.footprint_basis.committed.get(&other_version).cloned(),
+        };
+        let (Some(read), Some(committed)) = (&self.footprint_basis.read, committed) else {
             return Err(self.retryable_conflict_err(other_transaction, other_version));
         };
 
@@ -158,7 +173,7 @@ impl<'a> TransactionRebase<'a> {
                 })
         };
         let ours = with_ancestry(Footprint::pending(&self.transaction, read));
-        let theirs = with_ancestry(Footprint::committed(other_transaction, before, after));
+        let theirs = with_ancestry(committed);
         match ours.compare(&theirs) {
             Verdict::Compatible => Ok(()),
             Verdict::Rebase(overlaps) => match &mut self.transaction.operation {

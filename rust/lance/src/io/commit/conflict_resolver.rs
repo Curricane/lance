@@ -31,6 +31,7 @@ use lance_table::system_index::frag_reuse::lineage::TaggedLineage;
 use lance_table::system_index::frag_reuse::metadata::is_tagged;
 use lance_table::system_index::is_system_index;
 use lance_table::transaction::TaggedRewriteAssembly;
+use lance_table::transaction::action::Footprint;
 use lance_table::{format::Fragment, io::deletion::write_deletion_file};
 use roaring::RoaringBitmap;
 use std::{
@@ -85,38 +86,27 @@ pub struct TransactionRebase<'a> {
     /// settle it at commit time. A same-name CreateIndex that changed what
     /// the index is (its fields or type) still conflicts.
     staged_replay: bool,
-    /// The manifests a mixed pair's footprints are taken against. Boxed: the
-    /// commit loop holds the rebase across awaits.
-    manifests: Box<ManifestHistory>,
+    /// What the footprints of a pair with an action set on either side are
+    /// taken from. Boxed: the commit loop holds the rebase across awaits.
+    footprint_basis: Box<FootprintBasis>,
 }
 
-/// The manifest a transaction read and, by version, the ones committed since,
-/// as far as the caller has recorded them.
+/// The manifest a transaction read and, by version, the footprints of the
+/// named commits since that the caller recorded. A named commit's footprint
+/// is read off the manifests either side of it, which are dropped once it is
+/// taken; an action set's comes from its actions.
 #[derive(Debug, Default)]
-struct ManifestHistory {
+struct FootprintBasis {
     read: Option<Arc<Manifest>>,
-    by_version: HashMap<u64, Arc<Manifest>>,
+    committed: HashMap<u64, Footprint>,
 }
 
-impl ManifestHistory {
+impl FootprintBasis {
     fn read_at(dataset: &Dataset) -> Box<Self> {
-        let mut history = Box::new(Self {
+        Box::new(Self {
             read: Some(dataset.manifest.clone()),
             ..Default::default()
-        });
-        history.record(dataset.manifest.clone());
-        history
-    }
-
-    fn record(&mut self, manifest: Arc<Manifest>) {
-        self.by_version.insert(manifest.version, manifest);
-    }
-
-    /// The manifests either side of the commit of `version`.
-    fn around(&self, version: u64) -> Option<(&Manifest, &Manifest)> {
-        let before = self.by_version.get(&version.checked_sub(1)?)?;
-        let after = self.by_version.get(&version)?;
-        Some((before, after))
+        })
     }
 }
 

@@ -1752,17 +1752,50 @@ pub(crate) async fn load_and_sort_new_transactions(
     Ok((new_ds, txns))
 }
 
-/// Record in `rebase` what its checks need to know about `transactions`,
-/// which committed on top of `since`, in version order.
+/// Record in `rebase` the footprints its checks take from the manifests
+/// either side of a commit in `transactions`, which committed on top of
+/// `since`, in version order.
+///
+/// Only those manifests are loaded, a commit at a time, and each pair is
+/// reduced to its footprint before the next is loaded: a writer thousands of
+/// versions behind holds what each commit touched, never a manifest per
+/// version. A commit whose preceding manifest is gone is left unrecorded,
+/// and its check fails closed.
 pub(crate) async fn record_committed_history(
     rebase: &mut TransactionRebase<'_>,
-    _dataset: &Dataset,
+    dataset: &Dataset,
     since: Arc<Manifest>,
     transactions: &[NewTransaction],
 ) -> Result<()> {
-    rebase.record_manifests(
-        std::iter::once(since).chain(transactions.iter().map(|(_, _, manifest)| manifest.clone())),
-    );
+    let load = |location| {
+        Dataset::get_manifest(
+            dataset.object_store.as_ref(),
+            location,
+            dataset.uri(),
+            dataset.session.as_ref(),
+        )
+    };
+    let mut previous = since;
+    for (index, (version, transaction, location)) in transactions.iter().enumerate() {
+        if !rebase.needs_committed_manifests(transaction) {
+            continue;
+        }
+        let before = if previous.version + 1 == *version {
+            Some(previous)
+        } else {
+            match index.checked_sub(1).map(|index| &transactions[index]) {
+                Some((before_version, _, before_location)) if before_version + 1 == *version => {
+                    Some(load(before_location).await?)
+                }
+                _ => None,
+            }
+        };
+        let after = load(location).await?;
+        if let Some(before) = before {
+            rebase.record_committed(*version, transaction, &before, &after);
+        }
+        previous = after;
+    }
     Ok(())
 }
 

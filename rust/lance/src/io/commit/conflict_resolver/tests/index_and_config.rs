@@ -65,7 +65,7 @@ fn test_mem_wal_install_conflicts_with_merge() {
             read_schema: None,
             reuse: Default::default(),
             staged_replay: false,
-            manifests: Default::default(),
+            footprint_basis: Default::default(),
         };
         let result = rebase.check_txn(&merge, 1);
         assert_eq!(result.is_err(), conflicts, "{result:?}");
@@ -95,7 +95,7 @@ fn test_mem_wal_install_conflicts_with_merge() {
         read_schema: None,
         reuse: Default::default(),
         staged_replay: false,
-        manifests: Default::default(),
+        footprint_basis: Default::default(),
     };
     let result = rebase.check_txn(&install, 1);
     assert!(
@@ -150,7 +150,7 @@ fn test_create_index_conflicts_only_on_same_name() {
         read_schema: None,
         reuse: Default::default(),
         staged_replay: false,
-        manifests: Default::default(),
+        footprint_basis: Default::default(),
     };
 
     let same_name = Transaction::new(
@@ -216,7 +216,7 @@ fn test_create_index_conflicts_only_on_same_name() {
         read_schema: None,
         reuse: Default::default(),
         staged_replay: false,
-        manifests: Default::default(),
+        footprint_basis: Default::default(),
     };
     let different_name_result = rebase.check_txn(&different_name, 1);
     assert!(
@@ -285,7 +285,7 @@ fn test_create_index_conflicts_with_concurrent_drop(
         read_schema: None,
         reuse: Default::default(),
         staged_replay: false,
-        manifests: Default::default(),
+        footprint_basis: Default::default(),
     };
     let result = rebase.check_txn(&Transaction::new(0, committed_operation, None), 1);
 
@@ -336,7 +336,7 @@ fn test_concurrent_index_drops_are_compatible() {
         read_schema: None,
         reuse: Default::default(),
         staged_replay: false,
-        manifests: Default::default(),
+        footprint_basis: Default::default(),
     };
 
     let result = rebase.check_txn(&Transaction::new(0, drop_operation, None), 1);
@@ -389,7 +389,7 @@ fn test_index_replacement_compatible_with_removing_disjoint_segment() {
         read_schema: None,
         reuse: Default::default(),
         staged_replay: false,
-        manifests: Default::default(),
+        footprint_basis: Default::default(),
     };
 
     let result = rebase.check_txn(&Transaction::new(0, removal_operation, None), 1);
@@ -471,7 +471,7 @@ fn test_create_ngram_index_conflicts_with_overlapping_deferred_rewrite() {
             read_schema: None,
             reuse: Default::default(),
             staged_replay: false,
-            manifests: Default::default(),
+            footprint_basis: Default::default(),
         };
         let result = rebase.check_txn(&rewrite, 2);
         if expect_conflict {
@@ -561,7 +561,7 @@ fn test_create_index_conflicts_with_deferred_rewrite_under_stable_row_ids() {
 
             staged_replay: false,
 
-            manifests: Default::default(),
+            footprint_basis: Default::default(),
         };
         // Disjoint from the rewritten fragment, so this only exercises the
         // stable-row-ids check and not the group-straddling check below it.
@@ -647,14 +647,10 @@ fn tombstone_txn(fragment: u64, field: i32) -> Transaction {
 /// Assert the verdict holds whichever transaction is the one rebasing, the
 /// other having committed version 2.
 async fn assert_conflict(dataset: &Dataset, a: Transaction, b: Transaction, expected: bool) {
-    let mut committed = dataset.manifest.as_ref().clone();
-    committed.version = 2;
-    let committed = Arc::new(committed);
     for (ours, theirs) in [(a.clone(), b.clone()), (b, a)] {
         let mut rebase = TransactionRebase::try_new(dataset, ours, None)
             .await
             .unwrap();
-        rebase.record_manifests([committed.clone()]);
         assert_eq!(rebase.check_txn(&theirs, 2).is_err(), expected);
     }
 }
@@ -841,7 +837,7 @@ async fn assert_retryable_or_ok(
     let mut rebase = TransactionRebase::try_new(dataset, ours, None)
         .await
         .unwrap();
-    rebase.record_manifests([Arc::new(committed)]);
+    rebase.record_committed(2, theirs, &dataset.manifest, &committed);
     let result = rebase.check_txn(theirs, 2);
     if expected {
         assert!(
@@ -858,8 +854,8 @@ async fn assert_retryable_or_ok(
     }
 }
 
-/// Without the manifests either side of the concurrent commit there is
-/// nothing to take its footprint against, so the pair fails closed.
+/// Without the manifests either side of a named commit there is nothing to
+/// take its footprint against, so the pair fails closed.
 #[tokio::test]
 async fn test_a_pair_without_its_manifests_fails_closed() {
     let dataset = test_dataset(10, 2).await;
@@ -867,7 +863,7 @@ async fn test_a_pair_without_its_manifests_fails_closed() {
         .await
         .unwrap();
 
-    let result = rebase.check_txn(&tombstone_txn(1, 0), 2);
+    let result = rebase.check_txn(&named_table_metadata_txn(1, "a"), 2);
     assert!(
         matches!(result, Err(Error::RetryableCommitConflict { .. })),
         "expected a retryable conflict, got {result:?}",
@@ -1338,7 +1334,7 @@ fn test_compacted_sstables_conflict_lower_generation_fails() {
         read_schema: None,
         reuse: Default::default(),
         staged_replay: false,
-        manifests: Default::default(),
+        footprint_basis: Default::default(),
     };
 
     let result = rebase.check_txn(&committed_txn, 1);
@@ -1387,7 +1383,7 @@ fn test_compacted_sstables_conflict_equal_generation_fails() {
         read_schema: None,
         reuse: Default::default(),
         staged_replay: false,
-        manifests: Default::default(),
+        footprint_basis: Default::default(),
     };
 
     let result = rebase.check_txn(&committed_txn, 1);
@@ -1437,7 +1433,7 @@ fn test_compacted_sstables_conflict_higher_generation_retryable() {
         read_schema: None,
         reuse: Default::default(),
         staged_replay: false,
-        manifests: Default::default(),
+        footprint_basis: Default::default(),
     };
 
     let result = rebase.check_txn(&committed_txn, 1);
@@ -1487,7 +1483,7 @@ fn test_compacted_sstables_different_shards_ok() {
         read_schema: None,
         reuse: Default::default(),
         staged_replay: false,
-        manifests: Default::default(),
+        footprint_basis: Default::default(),
     };
 
     let result = rebase.check_txn(&committed_txn, 1);
@@ -1547,7 +1543,7 @@ fn test_update_mem_wal_state_vs_create_index_with_compacted_sstables() {
         read_schema: None,
         reuse: Default::default(),
         staged_replay: false,
-        manifests: Default::default(),
+        footprint_basis: Default::default(),
     };
 
     let result = rebase.check_txn(&committed_txn, 1);
@@ -1582,7 +1578,7 @@ fn test_update_mem_wal_state_vs_create_index_with_compacted_sstables() {
         read_schema: None,
         reuse: Default::default(),
         staged_replay: false,
-        manifests: Default::default(),
+        footprint_basis: Default::default(),
     };
 
     let result_higher = rebase_higher.check_txn(&committed_txn, 1);
@@ -1638,7 +1634,7 @@ fn test_create_index_vs_update_mem_wal_state_rebase() {
         read_schema: None,
         reuse: Default::default(),
         staged_replay: false,
-        manifests: Default::default(),
+        footprint_basis: Default::default(),
     };
 
     // CreateIndex of MemWalIndex should be compatible with UpdateMemWalState

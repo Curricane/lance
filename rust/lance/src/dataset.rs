@@ -4544,8 +4544,9 @@ impl Dataset {
 }
 
 /// A transaction committed since a dataset version: the version it committed,
-/// the transaction, and the manifest it committed.
-pub(crate) type NewTransaction = (u64, Arc<Transaction>, Arc<Manifest>);
+/// the transaction, and where the manifest it committed is. The manifest
+/// itself is not kept: a writer far behind would hold one per version.
+pub(crate) type NewTransaction = (u64, Arc<Transaction>, ManifestLocation);
 
 pub(crate) struct NewTransactionResult<'a> {
     pub dataset: BoxFuture<'a, Result<Dataset>>,
@@ -4601,7 +4602,7 @@ pub(crate) fn load_new_transactions(dataset: &Dataset) -> NewTransactionResult<'
                     cached
                 } else {
                     let mut dataset_version = dataset.clone();
-                    dataset_version.set_manifest(manifest_copy.clone(), location);
+                    dataset_version.set_manifest(manifest_copy.clone(), location.clone());
                     let loaded =
                         Arc::new(dataset_version.read_transaction().await?.ok_or_else(|| {
                             Error::internal(format!(
@@ -4615,7 +4616,7 @@ pub(crate) fn load_new_transactions(dataset: &Dataset) -> NewTransactionResult<'
                         .await;
                     loaded
                 };
-            Ok((manifest.version, transaction, manifest))
+            Ok((manifest.version, transaction, location))
         })
         .try_buffer_unordered(stage_parallelism);
 

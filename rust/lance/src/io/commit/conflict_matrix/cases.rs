@@ -48,7 +48,7 @@ delete                    | L  R  R  L  R  L  R  L  L  R  R  L  R  X  X  L  L  L
 delete_whole_fragment     | L  R  R  R  R  L  R  L  L  R  R  L  R  X  X  L  L  L  L  R  R  L
 update_rewrite_rows       | L  L  R  R  R  R  R  L  R  R  R  L  R  X  X  L  L  L  L  R  R  L
 update_rewrite_columns    | L  R  R  R  R  R  R  R  R  R  R  L  R  X  X  L  L  L  L  R  R  L
-data_overlay              | L  L  R  R  L  L  L  R  R  R  R  L  R  X  X  L  L  L  L  L  L  L
+data_overlay              | L  L  R  R  L  L  L  R  R  R  R  L  R  X  X  L  L  L  L  L  R* L
 data_replacement          | L  L  X  R  R  L  R  X  R  R  R  L  R  X  X  L  L  L  L  R  R  L
 project                   | L  L  L  L  L  L  L  R  R  R  R  L  L  X  X  R  L  R  R  R  L  R
 project_alter_nullability | R  L  L  R  R  R  R  R  R  R  R  L  L  X  X  R  L  R  R  R  L  R
@@ -63,7 +63,7 @@ action_append             | L  L  L  L  L  L  L  L  L  L  L  L  L  R  R  L  L  L
 action_update_config      | L  L  L  L  L  L  L  L  L  L  L  L  L  R  R  R  L  R  R  L  L  L
 action_append_and_config  | L  L  L  L  L  L  L  L  L  L  L  L  L  R  R  R  L  R  R  L  L  L
 action_add_column         | L  L  R  R  L  L  R  L  L  R  R  L  R  R  R  L  L  L  L  R  R  L
-action_replace_column     | L  L  R  R  R  L  R  R  R  R  R  L  R  R  R  L  L  L  L  R  R  L
+action_replace_column     | L  L  R  R  R  R* R  R  R  R  R  L  R  R  R  L  L  L  L  R  R  L
 action_rename_column      | L  L  L  L  L  L  L  R  R  R  R  L  L  R  R  L  L  L  L  L  L  R
 ";
 
@@ -192,7 +192,12 @@ pub(super) fn known_bug(ours: Scenario, theirs: Scenario) -> Option<&'static str
 /// Keyed by scenario rather than by cell because a gap comes from how the
 /// resolver treats a kind of operation, not from one particular pairing. When
 /// the last `*` cell involving a scenario is closed, its entry goes too.
-const PARITY_GAPS: &[(Scenario, &str)] = &[];
+const PARITY_GAPS: &[(Scenario, &str)] =
+    &[(Scenario::ActionReplaceColumn, REWRITE_DROPS_NEWER_OVERLAY)];
+
+const REWRITE_DROPS_NEWER_OVERLAY: &str = "an action column replacement's AddDataFile tombstones \
+     every overlay on the column, including one committed after it read, so it is kept from \
+     commuting with an overlay; legacy DataReplacement keeps the newer overlay and lands";
 
 fn parity_gap_reason(ours: Scenario, theirs: Scenario) -> Option<&'static str> {
     [ours, theirs].into_iter().find_map(|scenario| {

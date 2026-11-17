@@ -57,9 +57,10 @@ pub enum Coordinate {
     /// The base data backing one field within one committed fragment.
     FieldData { fragment: u64, field: i32 },
     /// The overlays shadowing one field's base data within one committed
-    /// fragment. Apart from [`Coordinate::FieldData`] because a column rewrite
-    /// and an overlay commute: whichever lands second, the overlay is the newer
-    /// value and stays on top.
+    /// fragment. Apart from [`Coordinate::FieldData`] because a re-encode of
+    /// the column and an overlay commute: the re-encode keeps the overlay and
+    /// every row's offset. New base values do not; see
+    /// [`Footprint::supersede_overlays`].
     FieldOverlays { fragment: u64, field: i32 },
     /// One facet of a field's definition in the schema.
     FieldDefinition { field: i32, facet: FieldFacet },
@@ -222,8 +223,8 @@ enum Mode {
     /// is the case: new values for a subset of one field's cells in one
     /// fragment. Two of these commute -- both land, the newer wins where they
     /// overlap -- which is what sets it apart from a full write. Overlays
-    /// claim [`Coordinate::FieldOverlays`], not the base data a move or a
-    /// column rewrite claims, so they commute with both.
+    /// claim [`Coordinate::FieldOverlays`], not the base data a move claims,
+    /// so they commute with a re-encode.
     ///
     /// It also serves as a conflict marker on a coordinate the set does not
     /// change at all, where it needs exactly this row and column of the table:
@@ -988,6 +989,26 @@ impl Footprint {
         for field in fields {
             self.require_facet(field, FieldFacet::Existence);
             self.claim(Coordinate::FieldData { fragment, field }, mode);
+        }
+    }
+
+    /// Record that this set's new base values for `fields` in `fragment`
+    /// tombstone every overlay on them, which a concurrent overlay would be
+    /// lost to in either order.
+    ///
+    /// TODO: an overlay committed after this set read is newer than its
+    /// values. `TombstoneFieldData` already keeps such an overlay; once
+    /// `AddDataFile` does too, the two can commute.
+    pub(super) fn supersede_overlays(
+        &mut self,
+        fragment: Ref,
+        fields: impl IntoIterator<Item = FieldRef>,
+    ) {
+        let Some(fragment) = fragment.committed() else {
+            return;
+        };
+        for field in fields.into_iter().filter_map(committed_field) {
+            self.write(Coordinate::FieldOverlays { fragment, field });
         }
     }
 

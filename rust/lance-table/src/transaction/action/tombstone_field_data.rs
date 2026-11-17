@@ -139,8 +139,8 @@ impl TombstoneFieldData {
             // read, and any it added itself, so the drop is not silently masked
             // by stale overlay cells. An overlay committed concurrently is newer
             // than what this operation read and stays on top, as it does over a
-            // legacy DataReplacement; footprints let the two commute on that
-            // basis.
+            // legacy DataReplacement. The AddDataFile installing the new values
+            // still tombstones it, so footprints keep the two from commuting.
             let overlaid: Vec<u32> = field_ids
                 .iter()
                 .filter_map(|id| u32::try_from(*id).ok())
@@ -174,14 +174,17 @@ impl TombstoneFieldData {
     }
 
     /// The data of each named field in this fragment, and nothing else: another
-    /// field's data in the same fragment is untouched, and so are the
-    /// overlays committed after this operation read.
+    /// field's data in the same fragment is untouched. New values also
+    /// supersede the fields' overlays; see [`Footprint::supersede_overlays`].
     pub(super) fn footprint(&self, footprint: &mut Footprint) {
         footprint.write_field_data(
             self.fragment,
             self.field_ids.iter().copied(),
             self.data_change,
         );
+        if self.data_change {
+            footprint.supersede_overlays(self.fragment, self.field_ids.iter().copied());
+        }
     }
 }
 

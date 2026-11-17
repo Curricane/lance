@@ -60,11 +60,6 @@ const EXEMPT: &[(Scenario, Scenario, &str)] = &[
         NEWER_OVERLAY_WINS,
     ),
     (
-        Scenario::ActionReplaceColumn,
-        Scenario::DataOverlay,
-        NEWER_OVERLAY_WINS,
-    ),
-    (
         Scenario::ActionAddColumn,
         Scenario::Append,
         NEW_COLUMN_MISSES_NEW_ROWS,

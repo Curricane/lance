@@ -135,12 +135,12 @@ impl AddOverlays {
     /// the fragment's deletions.
     ///
     /// Partial, because two concurrent overlays over the same cells both land
-    /// and the newer `committed_version` decides which value wins. A full
-    /// rewrite of the same column commutes with it too: landing second, the
-    /// overlay is newer than the rewrite's values, and landing first, it was
-    /// committed after the rewrite read, so
-    /// [`TombstoneFieldData`](super::TombstoneFieldData) leaves it in place.
-    /// That is legacy's `DataReplacement`-beside-`DataOverlay` behaviour.
+    /// and the newer `committed_version` decides which value wins. New base
+    /// values for the same column are another matter: they tombstone every
+    /// overlay on it as they land, so the overlay's values would be lost
+    /// without a trace. That pair conflicts in either order (see
+    /// [`Footprint::supersede_overlays`]); a re-encode keeps the overlay, and
+    /// commutes with it.
     ///
     /// The definition is required for the same reason a data file requires it:
     /// the overlay's values are encoded in the type the schema names, and a

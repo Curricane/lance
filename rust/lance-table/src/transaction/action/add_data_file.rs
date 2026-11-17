@@ -5,10 +5,11 @@
 
 use super::apply::ApplyState;
 use super::proto::required;
-use super::{FieldRef, Footprint, Ref};
+use super::{FieldFacet, FieldRef, Footprint, Ref};
 use crate::format::{DataFile, pb, pb_actions};
 use lance_core::deepsize::DeepSizeOf;
 use lance_core::{Error, Result};
+use lance_file::version::ConcreteFileVersion;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -264,16 +265,41 @@ impl AddDataFile {
     /// In a fragment this set mints, a committed field's existence is not
     /// required: apply rejects a file naming a field the schema no longer has,
     /// so a concurrent drop landing first is rebased past instead, by leaving
-    /// the field out of the file (see [`Self::forget_field`]).
+    /// the field out of the file (see [`Self::forget_field`]). Not a legacy V1
+    /// file: its reader places each field's columns by the field's position
+    /// in the list, so leaving one out would shift the rest onto the wrong
+    /// columns. Like `DropField`, which keeps a V1 file's list whole, it
+    /// requires every field it backs to still exist instead.
+    ///
+    /// New values also supersede the field's overlays in a committed fragment;
+    /// see [`Footprint::supersede_overlays`].
     pub(super) fn footprint(&self, footprint: &mut Footprint) {
         if self.fragment.committed().is_none() {
-            footprint.write_into_new_fragment(self.field_ids.iter().copied());
+            if self.is_v1() {
+                for field in self.field_ids.iter().copied() {
+                    footprint.require_field_facet(field, FieldFacet::Existence);
+                }
+            } else {
+                footprint.write_into_new_fragment(self.field_ids.iter().copied());
+            }
         }
         footprint.write_field_data(
             self.fragment,
             self.field_ids.iter().copied(),
             self.data_change,
         );
+        if self.data_change {
+            footprint.supersede_overlays(self.fragment, self.field_ids.iter().copied());
+        }
+    }
+
+    /// Whether the file is in the legacy V1 format, taking a version that
+    /// does not parse as one, since that is the stricter treatment.
+    fn is_v1(&self) -> bool {
+        matches!(
+            self.file.file_version(),
+            Ok(ConcreteFileVersion::V1) | Err(_)
+        )
     }
 }
 

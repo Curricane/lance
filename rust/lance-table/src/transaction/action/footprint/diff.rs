@@ -205,7 +205,15 @@ impl Footprint {
         }
         for field in added {
             self.write(Coordinate::FieldName(field.name.clone()));
-            if !field.nullable {
+            // As `AddField` claims: a stale writer may write a committed
+            // parent packed without the new child, whatever its nullability.
+            let parent = before
+                .field_by_id(field.parent_id)
+                .map(|parent| FieldRef::Committed(parent.id));
+            if let Some(parent) = parent {
+                self.add_child(parent);
+            }
+            if !field.nullable || parent.is_some() {
                 self.write(Coordinate::NewRowSchema);
             }
         }
@@ -248,8 +256,10 @@ impl Footprint {
     }
 }
 
-/// Which file, and which column in it, backs each live field of `fragment`.
-fn backing(fragment: &Fragment) -> HashMap<i32, (&str, Option<i32>)> {
+/// Which file, in which base, and which column in it, backs each live field
+/// of `fragment`. A path is relative to its base, so the same path in another
+/// base is other bytes.
+fn backing(fragment: &Fragment) -> HashMap<i32, (Option<u32>, &str, Option<i32>)> {
     fragment
         .files
         .iter()
@@ -260,7 +270,7 @@ fn backing(fragment: &Fragment) -> HashMap<i32, (&str, Option<i32>)> {
                 .filter(|(_, field)| **field >= 0)
                 .map(|(position, field)| {
                     let column = file.column_indices.get(position).copied();
-                    (*field, (file.path.as_str(), column))
+                    (*field, (file.base_id, file.path.as_str(), column))
                 })
         })
         .collect()

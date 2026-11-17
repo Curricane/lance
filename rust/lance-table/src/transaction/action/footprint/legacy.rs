@@ -1146,6 +1146,8 @@ mod tests {
         }], vec![two_column_fragment(0)], vec![], None),
         true
     )]
+    // The rewrite's new file tombstones every overlay on the column as it
+    // lands, the newer one included.
     #[case::a_column_replacement_over_an_overlay(
         replace_c(0, true),
         Operation::DataOverlay {
@@ -1154,7 +1156,7 @@ mod tests {
                 overlays: vec![overlay_with_field(1, 0)],
             }],
         },
-        false
+        true
     )]
     #[case::a_column_replacement_over_a_replacement(
         replace_c(0, true),
@@ -1189,6 +1191,141 @@ mod tests {
         let before = two_column_manifest();
         assert_eq!(
             conflicts_with_committed(&actions(pending), &before, committed),
+            expected
+        );
+    }
+
+    /// A file's path is relative to its base, so moving a column to another
+    /// base with the same path and column replaces its values.
+    #[test]
+    fn test_a_column_replacement_over_a_replacement_moving_it_to_another_base() {
+        let mut before = two_column_manifest();
+        for id in [1, 2] {
+            before.base_paths.insert(
+                id,
+                BasePath::new(id, format!("s3://example/base{id}"), None, false),
+            );
+        }
+        let mut fragments = before.fragments.as_ref().clone();
+        fragments[0].files[1].base_id = Some(1);
+        before.fragments = Arc::new(fragments);
+        let mut moved = before.fragments[0].files[1].clone();
+        moved.base_id = Some(2);
+
+        assert!(conflicts_with_committed(
+            &actions(replace_c(0, true)),
+            &before,
+            Operation::DataReplacement {
+                replacements: vec![DataReplacementGroup(0, moved)],
+                data_change: true,
+            },
+        ));
+    }
+
+    /// `s: {x}`, with one file per fragment backing the struct and its child.
+    fn struct_manifest() -> Manifest {
+        let schema = ArrowSchema::new(vec![ArrowField::new(
+            "s",
+            DataType::Struct(vec![ArrowField::new("x", DataType::Int32, false)].into()),
+            false,
+        )]);
+        let mut fragment = Fragment::new(0);
+        fragment.physical_rows = Some(3);
+        fragment.files = vec![DataFile::new(
+            "data/s-0.lance",
+            vec![0, 1],
+            vec![-1, 0],
+            ConcreteFileVersion::V2_1,
+            None,
+            None,
+        )];
+        let mut manifest = Manifest::new(
+            Schema::try_from(&schema).unwrap(),
+            Arc::new(vec![fragment]),
+            DataStorageFormat::new(ConcreteFileVersion::V2_1),
+            HashMap::new(),
+        );
+        manifest.version = 2;
+        manifest
+    }
+
+    /// A stale append may write a struct packed without a child added under
+    /// it since, whatever the child's nullability, and the rows would not
+    /// decode. A nullable column added at the top level leaves the rows'
+    /// existing columns as they were.
+    #[rstest]
+    #[case::a_nullable_child_under_the_struct(
+        ArrowField::new(
+            "s",
+            DataType::Struct(
+                vec![
+                    ArrowField::new("x", DataType::Int32, false),
+                    ArrowField::new("y", DataType::Int32, true),
+                ]
+                .into(),
+            ),
+            false,
+        ),
+        None,
+        true
+    )]
+    #[case::a_nullable_top_level_column(
+        ArrowField::new(
+            "s",
+            DataType::Struct(vec![ArrowField::new("x", DataType::Int32, false)].into()),
+            false,
+        ),
+        Some(ArrowField::new("y", DataType::Int32, true)),
+        false
+    )]
+    fn test_an_append_over_a_merge_adding_a_nullable_field(
+        #[case] struct_field: ArrowField,
+        #[case] top_level: Option<ArrowField>,
+        #[case] expected: bool,
+    ) {
+        let before = struct_manifest();
+        let merged = Schema::try_from(&ArrowSchema::new(
+            std::iter::once(struct_field)
+                .chain(top_level)
+                .collect::<Vec<_>>(),
+        ))
+        .unwrap();
+        let mut merged_fragment = before.fragments[0].clone();
+        merged_fragment.files.push(field_file("y-0", 2));
+        let append = actions(vec![
+            Action::AddFragment(AddFragment::new_unchecked(AddFragmentParts {
+                id: Ref::Local(0),
+                physical_rows: 3,
+                row_id_meta: None,
+                last_updated_at_version_meta: None,
+                created_at_version_meta: None,
+                data_change: true,
+            })),
+            Action::AddDataFile(
+                AddDataFile::try_new_unchecked(
+                    Ref::Local(0),
+                    DataFile {
+                        column_indices: vec![-1, 0].into(),
+                        ..without_fields(before.fragments[0].files[0].clone())
+                    },
+                    vec![FieldRef::Committed(0), FieldRef::Committed(1)],
+                    None,
+                    true,
+                )
+                .unwrap(),
+            ),
+        ]);
+
+        assert_eq!(
+            conflicts_with_committed(
+                &append,
+                &before,
+                Operation::Merge {
+                    fragments: vec![merged_fragment],
+                    schema: merged,
+                    preserves_nullability: true,
+                },
+            ),
             expected
         );
     }

@@ -236,9 +236,10 @@ mod tests {
         added_field, any_deletion_file, apply, backed_manifest, footprint,
     };
     use crate::transaction::action::{
-        Action, AddField, AddFragment, AddFragmentParts, AddIndexSegment, AddIndexSegmentParts,
-        AdjustIndexCoverage, AdjustIndexCoverageParts, AlterField, CompositeOperation, DropField,
-        FieldRef, RemoveFragment, SetDeletionFile, TombstoneFieldData, UserStep,
+        Action, AddDataFile, AddField, AddFragment, AddFragmentParts, AddIndexSegment,
+        AddIndexSegmentParts, AdjustIndexCoverage, AdjustIndexCoverageParts, AlterField,
+        CompositeOperation, DropField, FieldRef, RemoveFragment, SetDeletionFile,
+        TombstoneFieldData, UserStep,
     };
     use crate::transaction::test_support::{default_build_config, make_stable_row_id_manifest};
     use crate::transaction::{Operation, Transaction};
@@ -399,27 +400,63 @@ mod tests {
         assert!(!ours.conflicts_with(&theirs));
     }
 
-    /// A full rewrite of the overlaid column replaces every cell from a
-    /// snapshot that never saw the overlay, but it only tombstones the
-    /// overlays committed by then, and a re-encode (`data_change` false)
-    /// leaves them alone. Whichever lands second, the overlay is the newer
-    /// value and stays on top, as legacy lets `DataReplacement` land beside
-    /// `DataOverlay`.
+    /// New base values for the overlaid column tombstone every overlay on it
+    /// as they land, including one committed after the rewrite read, so the
+    /// overlay's values would be lost; the pair conflicts in either order. A
+    /// re-encode (`data_change` false) keeps the overlay and every row's
+    /// offset, so the overlay still wins its cells whichever lands first.
     #[rstest::rstest]
-    #[case::rewrite(true)]
-    #[case::reencode(false)]
-    fn test_an_overlay_and_a_rewrite_of_the_same_column_commute(#[case] data_change: bool) {
+    #[case::rewrite(rewrite_of_field_zero(true), true)]
+    #[case::reencode(rewrite_of_field_zero(false), false)]
+    #[case::a_file_for_a_field_with_only_overlays(
+        vec![Action::AddDataFile(
+            AddDataFile::try_new_unchecked(
+                Ref::Committed(0),
+                DataFile::new("data/new.lance", vec![], vec![0], ConcreteFileVersion::V2_0, None, None),
+                vec![FieldRef::Committed(0)],
+                None,
+                true,
+            )
+            .unwrap(),
+        )],
+        true
+    )]
+    fn test_an_overlay_conflicts_with_new_base_values_for_its_column(
+        #[case] rewrite: Vec<Action>,
+        #[case] expected: bool,
+    ) {
         let overlaid = footprint(vec![add(Ref::Committed(0), vec![overlay("a.lance", &[0])])]);
-        let rewrite = footprint(vec![Action::TombstoneFieldData(
-            TombstoneFieldData::new_unchecked(
+        let rewrite = footprint(rewrite);
+
+        assert_eq!(overlaid.conflicts_with(&rewrite), expected);
+        assert_eq!(rewrite.conflicts_with(&overlaid), expected);
+    }
+
+    fn rewrite_of_field_zero(data_change: bool) -> Vec<Action> {
+        vec![
+            Action::TombstoneFieldData(TombstoneFieldData::new_unchecked(
                 Ref::Committed(0),
                 vec![FieldRef::Committed(0)],
                 data_change,
+            )),
+            Action::AddDataFile(
+                AddDataFile::try_new_unchecked(
+                    Ref::Committed(0),
+                    DataFile::new(
+                        "data/new.lance",
+                        vec![],
+                        vec![0],
+                        ConcreteFileVersion::V2_0,
+                        None,
+                        None,
+                    ),
+                    vec![FieldRef::Committed(0)],
+                    None,
+                    data_change,
+                )
+                .unwrap(),
             ),
-        )]);
-
-        assert!(!overlaid.conflicts_with(&rewrite));
-        assert!(!rewrite.conflicts_with(&overlaid));
+        ]
     }
 
     /// An overlay landing after its field's nullability changed or the field
@@ -480,12 +517,11 @@ mod tests {
     }
 
     /// One set may overlay a cell and then rewrite the whole column in the
-    /// same operation (an overlay being materialized). The rewrite tombstones
-    /// that set's own overlay, but a concurrent overlay of the column is newer
-    /// than what it read and stays on top, so the two commute; so does a
-    /// rewrite of a different column. A rewrite of the same column does not.
+    /// same operation (an overlay being materialized). The full write is what
+    /// a concurrent set sees: another overlay of the column no longer
+    /// commutes with it, while a rewrite of a different column still does.
     #[test]
-    fn test_materializing_an_overlay_commutes_with_a_concurrent_one() {
+    fn test_a_full_write_in_the_same_set_dominates_a_partial_one() {
         let materialize = footprint(vec![
             add(Ref::Committed(0), vec![overlay("a.lance", &[0])]),
             Action::TombstoneFieldData(TombstoneFieldData::new(
@@ -499,17 +535,10 @@ mod tests {
             vec![FieldRef::Committed(1)],
         ))]);
 
-        let same_column = footprint(vec![Action::TombstoneFieldData(TombstoneFieldData::new(
-            Ref::Committed(0),
-            vec![FieldRef::Committed(0)],
-        ))]);
-
-        assert!(!materialize.conflicts_with(&other_overlay));
-        assert!(!other_overlay.conflicts_with(&materialize));
+        assert!(materialize.conflicts_with(&other_overlay));
+        assert!(other_overlay.conflicts_with(&materialize));
         assert!(!materialize.conflicts_with(&other_column));
         assert!(!other_column.conflicts_with(&materialize));
-        assert!(materialize.conflicts_with(&same_column));
-        assert!(same_column.conflicts_with(&materialize));
     }
 
     /// Overlaid cells have changed since the version a consumer last read, so

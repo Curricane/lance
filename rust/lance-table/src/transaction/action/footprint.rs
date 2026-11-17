@@ -2096,4 +2096,29 @@ mod tests {
             Verdict::Conflict => panic!("expected {expected:?}, got a conflict"),
         }
     }
+
+    /// A legacy V1 file has no column indices: its reader places a field's
+    /// columns by the field's position in the list, so leaving a dropped field
+    /// out would shift every field after it onto the wrong columns. Such a
+    /// file cannot be rebased past a drop, as `DropField` keeps a V1 file's
+    /// list whole.
+    #[test]
+    fn test_a_new_v1_file_conflicts_with_a_drop_of_a_field_it_backs() {
+        let v1_file = Action::AddDataFile(
+            AddDataFile::try_new_unchecked(
+                Ref::Local(0),
+                DataFile::new_unstarted("data/x.lance", ConcreteFileVersion::V1),
+                vec![FieldRef::Committed(1), FieldRef::Committed(2)],
+                None,
+                true,
+            )
+            .unwrap(),
+        );
+        let ours = footprint(vec![add_fragment(Ref::Local(0)), v1_file]);
+
+        assert!(matches!(
+            ours.compare(&footprint(vec![drop_field(1)])),
+            Verdict::Conflict
+        ));
+    }
 }

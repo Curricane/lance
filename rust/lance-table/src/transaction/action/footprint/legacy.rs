@@ -16,7 +16,8 @@
 //! post-image.
 
 use super::{ConfigMap, Coordinate, FieldRef, Footprint, Ref};
-use crate::format::{BasePath, Fragment, IndexMetadata};
+use crate::format::{BasePath, Fragment, IndexMetadata, RowIdMeta};
+use crate::rowids::read_row_ids;
 use crate::system_index::frag_reuse::FRAG_REUSE_INDEX_NAME;
 use crate::system_index::mem_wal::MEM_WAL_INDEX_NAME;
 use crate::transaction::Operation;
@@ -213,15 +214,24 @@ impl Footprint {
     }
 
     /// Fragments added with rows that were not in the dataset before. Their
-    /// ids are assigned at commit, so no concurrent writer can name one.
+    /// ids are assigned at commit, so no concurrent writer can name one. Row
+    /// ids they arrive carrying are claimed as an `AddFragment`'s are.
     fn append(&mut self, fragments: &[Fragment]) {
         if fragments.is_empty() {
             return;
         }
         self.add_rows();
         self.insert_rows();
-        for file in fragments.iter().flat_map(|fragment| &fragment.files) {
-            self.write_field_data(Ref::Local(0), field_refs(&file.fields));
+        for fragment in fragments {
+            if let Some(RowIdMeta::Inline(data)) = &fragment.row_id_meta {
+                match read_row_ids(data) {
+                    Ok(sequence) => self.supply_row_ids(&sequence.to_treemap()),
+                    Err(_) => self.mark_opaque(),
+                }
+            }
+            for file in &fragment.files {
+                self.write_field_data(Ref::Local(0), field_refs(&file.fields));
+            }
         }
     }
 
@@ -258,8 +268,8 @@ fn field_refs(fields: &[i32]) -> impl Iterator<Item = FieldRef> + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::DataFile;
     use crate::format::key_existence::{FilterType, KeyExistenceFilter};
-    use crate::format::{DataFile, RowIdMeta};
     use crate::rowids::write_row_ids;
     use crate::transaction::action::{
         Action, AddDataFile, AddFragment, AddFragmentParts, AddIndexSegment, AddIndexSegmentParts,
